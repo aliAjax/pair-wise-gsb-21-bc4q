@@ -1,161 +1,159 @@
+import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
+import type { DefectStatus, StationState } from "./data/types";
+import { seedState } from "./data/seed";
+import { clearState, loadState, saveState } from "./store/storage";
+import {
+  completeHandover,
+  decideHandoverItem,
+  evaluateRelease,
+  nextDefectId,
+  openHandover,
+  signRelease,
+  transitionDefect,
+} from "./domain/logic";
+import { NewDefectForm } from "./ui/NewDefectForm";
+import type { NewDefectInput } from "./ui/NewDefectForm";
+import { DefectBoard } from "./ui/DefectBoard";
+import { HandoverPanel } from "./ui/HandoverPanel";
+import { ReleaseDesk } from "./ui/ReleaseDesk";
 
-const project = {
-  "id": "hxwl-07",
-  "port": 5107,
-  "title": "航空维修检查清单",
-  "subtitle": "按ATA章节推进维修放行前检查",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#1d4ed8",
-    "#475569",
-    "#f97316"
-  ],
-  "domain": "航空维修",
-  "users": [
-    "维修工程师",
-    "放行人员",
-    "培训教员"
-  ],
-  "metrics": [
-    "完成率",
-    "缺陷项",
-    "待复核",
-    "ATA章节"
-  ],
-  "filters": [
-    "机体",
-    "动力装置",
-    "航电",
-    "起落架"
-  ],
-  "fields": [
-    "机型",
-    "ATA章节",
-    "检查区域",
-    "检查项目",
-    "缺陷描述",
-    "处理意见",
-    "签署人"
-  ],
-  "records": [
-    [
-      "A320",
-      "ATA 32",
-      "起落架",
-      "待复核",
-      "主轮磨耗接近限制"
-    ],
-    [
-      "B737",
-      "ATA 24",
-      "电源系统",
-      "正常",
-      "电瓶电压检查完成"
-    ],
-    [
-      "ARJ21",
-      "ATA 27",
-      "飞控",
-      "缺陷",
-      "副翼作动测试需复查"
-    ]
-  ]
-};
-
-const statusColors = ["status-ok", "status-watch", "status-danger"];
-
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
+function MetricCard({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
     <article className="metric-card">
       <span>{label}</span>
       <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
+      <i className={`tone-${tone}`} />
     </article>
   );
 }
 
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  // 保存层：启动时读取，之后每次变更自动落盘，重开接着办理
+  const [state, setState] = useState<StationState>(() => loadState() ?? seedState());
+  useEffect(() => {
+    saveState(state);
+  }, [state]);
+
+  const currentCrew = state.crews.find((c) => c.id === state.currentCrewId) ?? state.crews[0];
+
+  const counts = useMemo(() => {
+    const by = (s: DefectStatus) => state.defects.filter((d) => d.status === s).length;
+    return {
+      open: by("open"),
+      partsWait: by("parts_wait"),
+      recheck: by("recheck"),
+      closed: by("closed"),
+      pendingRelease: state.releases.filter((r) => r.status === "pending").length,
+    };
+  }, [state.defects, state.releases]);
+
+  function addDefect(input: NewDefectInput) {
+    setState((s) => ({
+      ...s,
+      defects: [
+        {
+          id: nextDefectId(s.defects),
+          ...input,
+          crewId: s.currentCrewId,
+          status: "open" as const,
+          partsNote: "",
+          history: [{ time: new Date().toISOString(), actor: currentCrew.name, action: "过站检查发现缺陷，登记保留" }],
+        },
+        ...s.defects,
+      ],
+    }));
+  }
+
+  function changeStatus(id: string, next: DefectStatus, note = "") {
+    setState((s) => ({
+      ...s,
+      defects: s.defects.map((d) => (d.id === id ? transitionDefect(d, next, currentCrew.name, note) : d)),
+    }));
+  }
+
+  function startHandover() {
+    const other = state.crews.find((c) => c.id !== state.currentCrewId);
+    if (!other) return;
+    setState((s) => ({ ...s, handover: openHandover(s, other.id) }));
+  }
+
+  function decideItem(defectId: string, accepted: boolean) {
+    setState((s) => (s.handover ? { ...s, handover: decideHandoverItem(s.handover, defectId, accepted) } : s));
+  }
+
+  function finishHandover() {
+    setState((s) => completeHandover(s));
+  }
+
+  function cancelHandover() {
+    setState((s) => ({ ...s, handover: null }));
+  }
+
+  function switchCrew(id: string) {
+    setState((s) => (s.handover ? s : { ...s, currentCrewId: id }));
+  }
+
+  function sign(releaseId: string, signer: string) {
+    setState((s) => ({
+      ...s,
+      releases: s.releases.map((r) =>
+        r.id === releaseId ? signRelease(r, evaluateRelease(r, s.defects, s.standSlots), signer) : r
+      ),
+    }));
+  }
+
+  function resetAll() {
+    if (window.confirm("确定清空当前数据并恢复示例数据？")) {
+      clearState();
+      setState(seedState());
+    }
+  }
 
   return (
     <main className="app-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+          <p className="eyebrow">hxwl-07 · 过站维修</p>
+          <h1>缺陷保留与放行台</h1>
+          <p className="subtitle">
+            过站缺陷登记保留，航材缺件转候补、到货复核后关闭；交接班逐条确认，未接管仍归原班组；放行前校验未关闭缺陷与机位冲突，存在阻塞时签署停在待办并写明原因。数据自动保存，重开页面接着办理。
+          </p>
         </div>
         <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
+          <span>当前班组</span>
+          <strong>{currentCrew.name}</strong>
+          <button onClick={resetAll}>恢复示例数据</button>
         </div>
       </section>
 
       <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
-        ))}
+        <MetricCard label="保留中" value={counts.open} tone="ok" />
+        <MetricCard label="候补待航材" value={counts.partsWait} tone="warn" />
+        <MetricCard label="到货复核" value={counts.recheck} tone="info" />
+        <MetricCard label="已关闭" value={counts.closed} tone="done" />
+        <MetricCard label="放行待办" value={counts.pendingRelease} tone="danger" />
       </section>
 
-      <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
+      <section className="station-grid">
+        <aside className="side">
+          <NewDefectForm onAdd={addDefect} />
+          <HandoverPanel
+            crews={state.crews}
+            currentCrewId={state.currentCrewId}
+            handover={state.handover}
+            defects={state.defects}
+            onSwitchCrew={switchCrew}
+            onStart={startHandover}
+            onDecide={decideItem}
+            onFinish={finishHandover}
+            onCancel={cancelHandover}
+          />
         </aside>
-
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
+        <DefectBoard defects={state.defects} crews={state.crews} onTransition={changeStatus} />
       </section>
 
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      <ReleaseDesk releases={state.releases} defects={state.defects} slots={state.standSlots} onSign={sign} />
     </main>
   );
 }
